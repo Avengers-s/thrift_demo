@@ -6,14 +6,96 @@
 #include <thrift/server/TSimpleServer.h>
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
-
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <vector>
+#include <condition_variable>
+#include <unistd.h>
+#include <iostream>
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
 using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 
 using namespace  ::match_service;
-
+using namespace std;
+struct Task
+{
+    User user;
+    string type;
+};
+struct MessageQueue
+{
+    queue<Task>q;
+    mutex m;
+    condition_variable cv;
+}messagequeue;
+class Pool
+{
+    public:
+        void add(User user)
+        {
+            users.push_back(user);
+            cnt.push_back(0);
+        }
+        void remove(User user)
+        {
+            for(uint32_t i=0;i<users.size();i++)
+            {
+                if(users[i].id==user.id)
+                {
+                    users.erase(users.begin()+i);
+                    cnt.erase(cnt.begin()+i);
+                    break;
+                }
+            }
+        }
+        bool check(int i,int j)
+        {
+            auto a=users[i],b=users[j];
+            int df=abs(a.score-b.score);
+            int maxa=50*cnt[i];
+            int maxb=50*cnt[j];
+            return df<=maxa&&df<=maxb;
+        }
+        void save(int a,int b)
+        {
+            printf("match %d %d\n",a,b);
+        }
+        void match()
+        {
+            for(uint32_t i=0;i<cnt.size();i++)
+            {
+                cnt[i]++;
+            }
+            while(users.size()>1)
+            {
+                int flag=0;
+                for(uint32_t i=0;i<users.size();i++)
+                {
+                    for(uint32_t j=i+1;j<users.size();j++)
+                    {
+                        if(check(i,j))
+                        {
+                            save(users[i].id,users[j].id);
+                            flag=1;
+                            users.erase(users.begin()+j);
+                            cnt.erase(cnt.begin()+j);
+                            users.erase(users.begin()+i);
+                            cnt.erase(cnt.begin()+i);
+                            break;
+                        }
+                    }
+                    if(flag)break;
+                }
+                if(!flag)break;
+            }
+        }
+    private:
+        vector<int>cnt;
+        vector<User>users;
+}pool;
 class MatchHandler : virtual public MatchIf {
  public:
   MatchHandler() {
@@ -31,6 +113,8 @@ class MatchHandler : virtual public MatchIf {
   int32_t add_user(const User& user, const std::string& info) {
     // Your implementation goes here
     printf("add_user\n");
+    unique_lock<mutex>lck(messagequeue.m);
+    messagequeue.q.push({user,"add"});
     return 0;
   }
 
@@ -45,11 +129,34 @@ class MatchHandler : virtual public MatchIf {
   int32_t remove_user(const User& user, const std::string& info) {
     // Your implementation goes here
     printf("remove_user\n");
+    unique_lock<mutex>lck(messagequeue.m);
+    messagequeue.q.push({user,"remove"});
     return 0;
   }
 
 };
+void consume()
+{
+    while(true)
+    {
+        unique_lock<mutex>lck(messagequeue.m);
+        if(messagequeue.q.empty())
+        {
+            lck.unlock();
+            pool.match();
+            sleep(1);
+        }
+        else
+        {
+            auto task=messagequeue.q.front();
+            messagequeue.q.pop();
+            lck.unlock();
+            if(task.type=="add")pool.add(task.user);
+            else if(task.type=="remove")pool.remove(task.user);
 
+        }
+    }
+}
 int main(int argc, char **argv) {
   int port = 9090;
   ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
@@ -59,6 +166,8 @@ int main(int argc, char **argv) {
   ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
   TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+  cout<<"match_server start!!"<<endl;
+  thread match_thread(consume);
   server.serve();
   return 0;
 }
