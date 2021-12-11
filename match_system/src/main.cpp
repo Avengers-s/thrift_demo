@@ -3,6 +3,11 @@
 
 #include "match_server/Match.h"
 #include "save_client/Save.h"
+#include <thrift/concurrency/ThreadManager.h>
+#include <thrift/concurrency/ThreadFactory.h>
+#include <thrift/server/TThreadPoolServer.h>
+#include <thrift/server/TThreadedServer.h>
+#include <thrift/TToString.h>
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/server/TSimpleServer.h>
 #include <thrift/transport/TServerSocket.h>
@@ -173,15 +178,24 @@ void consume()
         }
     }
 }
+class MatchCloneFactory : virtual public MatchIfFactory {
+    public:
+        ~MatchCloneFactory() override = default;
+        MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
+        {
+            std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
+            return new MatchHandler;
+        }
+        void releaseHandler(MatchIf* handler) override {
+            delete handler;
+        }
+};
 int main(int argc, char **argv) {
-    int port = 9090;
-    ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
-    ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
-    ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
-    ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
-    ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
-
-    TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+   TThreadedServer server(
+    std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
+    std::make_shared<TServerSocket>(9090), //port
+    std::make_shared<TBufferedTransportFactory>(),
+    std::make_shared<TBinaryProtocolFactory>()); 
     cout<<"match_server start!!"<<endl;
     thread match_thread(consume);
     server.serve();
